@@ -1,3 +1,4 @@
+import re
 from requests import Session
 from typing import Optional
 
@@ -30,10 +31,17 @@ class KinescopeVideo:
         if r.status_code == 404:
             raise VideoNotFound('Video not found')
 
-        if 'id: "' not in r.text:
+        # Current embed pages expose the video id as `"id":"<uuid>"`;
+        # older pages used `id: "<id>"`. Support both.
+        match = (
+            re.search(r'"id"\s*:\s*"([0-9a-fA-F-]{36})"', r.text)
+            or re.search(r'\bid:\s*"([^"]+)"', r.text)
+        )
+
+        if not match:
             raise AccessDenied('Access to the video is denied. Wrong referer_url is specified?')
 
-        return r.text.split('id: "')[1].split('"')[0]
+        return match.group(1)
 
     def get_mpd_master_playlist_url(self) -> str:
         return KINESCOPE_MASTER_PLAYLIST_URL.format(video_id=self.video_id)

@@ -3,6 +3,7 @@ from io import BytesIO
 from os import PathLike
 from typing import Union
 from pathlib import Path
+from urllib.parse import urljoin, urlparse
 from requests import Session
 from subprocess import Popen
 from shutil import copyfileobj, rmtree
@@ -20,8 +21,8 @@ from kinescope.exceptions import *
 class VideoDownloader:
     def __init__(self, kinescope_video: KinescopeVideo,
                  temp_dir: Union[str, PathLike] = './temp',
-                 ffmpeg_path: Union[str, PathLike] = './ffmpeg',
-                 mp4decrypt_path: Union[str, PathLike] = './mp4decrypt'):
+                 ffmpeg_path: Union[str, PathLike] = 'ffmpeg',
+                 mp4decrypt_path: Union[str, PathLike] = 'mp4decrypt'):
         self.kinescope_video: KinescopeVideo = kinescope_video
 
         self.temp_path: Path = Path(temp_dir)
@@ -36,6 +37,16 @@ class VideoDownloader:
             self.mp4decrypt_path = mp4decrypt_path
 
         self.http = Session()
+
+        # Embedded/private videos validate the Referer (and Origin) against the
+        # site the player is embedded on. Carry the provided referer through the
+        # manifest, segment and license requests — not just the embed page.
+        self.referer: str = kinescope_video.referer_url or KINESCOPE_BASE_URL
+        parsed_referer = urlparse(self.referer)
+        self.origin: str = (
+            f'{parsed_referer.scheme}://{parsed_referer.netloc}'
+            if parsed_referer.netloc else KINESCOPE_BASE_URL
+        )
 
         self.mpd_master: MPEGDASH = self._fetch_mpd_master()
 
@@ -70,7 +81,7 @@ class VideoDownloader:
             return b64decode(
                 self.http.post(
                     url=self.kinescope_video.get_clearkey_license_url(),
-                    headers={'origin': KINESCOPE_BASE_URL},
+                    headers={'origin': self.origin, 'Referer': self.referer},
                     json={
                         'kids': [
                             b64encode(bytes.fromhex(
@@ -92,50 +103,84 @@ class VideoDownloader:
             )
 
     def _fetch_segment(self,
-                       segment_url: str,
+                       segment: dict,
                        file):
+        headers = {'Referer': self.referer}
+        if segment.get('range'):
+            headers['Range'] = f"bytes={segment['range']}"
+
         for _ in range(5):
             try:
                 copyfileobj(
-                    BytesIO(self.http.get(segment_url, stream=True).content),
+                    BytesIO(self.http.get(segment['url'], headers=headers, stream=True).content),
                     file
                 )
                 return
             except ChunkedEncodingError:
                 pass
 
-        raise SegmentDownloadError(f'Failed to download segment {segment_url}')
+        raise SegmentDownloadError(f"Failed to download segment {segment['url']}")
 
     def _fetch_segments(self,
-                        segments_urls: list[str],
+                        segments: list[dict],
                         filepath: str | PathLike,
                         progress_bar_label: str = ''):
-        segments_urls = [seg for i, seg in enumerate(segments_urls) if i == segments_urls.index(seg)]
+        # De-duplicate while preserving order. Segments are keyed by (url, range)
+        # because the current Kinescope format serves every segment from the same
+        # file URL, distinguished only by its byte range.
+        seen, unique = set(), []
+        for segment in segments:
+            key = (segment['url'], segment.get('range'))
+            if key not in seen:
+                seen.add(key)
+                unique.append(segment)
+
         with open(filepath, 'wb') as f:
             with tqdm(desc=progress_bar_label,
-                      total=len(segments_urls),
+                      total=len(unique),
                       bar_format='{desc}: {percentage:3.0f}%|{bar:10}| [{n_fmt}/{total_fmt}]') as progress_bar:
-                for segment_url in segments_urls:
-                    self._fetch_segment(segment_url, f)
+                for segment in unique:
+                    self._fetch_segment(segment, f)
                     progress_bar.update()
 
-    def _get_segments_urls(self, resolution: tuple[int, int]) -> dict[str:list[str]]:
+    def _get_segments_urls(self, resolution: tuple[int, int]) -> dict[str, list[dict]]:
         try:
-            return {
-                adaptation_set.mime_type: [
-                    segment_url.media for segment_url in adaptation_set.representations[
-                        [(r.width, r.height) for r in adaptation_set.representations].index(resolution)
-                        if adaptation_set.representations[0].height else 0
-                    ].segment_lists[0].segment_urls
-                ] for adaptation_set in self.mpd_master.periods[0].adaptation_sets
-            }
+            result: dict[str, list[dict]] = {}
+            for adaptation_set in self.mpd_master.periods[0].adaptation_sets:
+                representations = adaptation_set.representations
+                # Video adaptation sets carry a height; audio ones don't.
+                representation = representations[
+                    [(r.width, r.height) for r in representations].index(resolution)
+                    if representations[0].height else 0
+                ]
+
+                base_url = representation.base_urls[0].base_url_value if representation.base_urls else ''
+                segment_list = representation.segment_lists[0]
+
+                segments: list[dict] = []
+                # The initialization segment (moov/ftyp) must come first so the
+                # concatenated byte ranges form a valid mp4.
+                for initialization in (segment_list.initializations or []):
+                    source_url = initialization.source_url or ''
+                    segments.append({
+                        'url': urljoin(base_url, source_url) if source_url else base_url,
+                        'range': initialization.range,
+                    })
+                for segment_url in segment_list.segment_urls:
+                    segments.append({
+                        'url': urljoin(base_url, segment_url.media) if segment_url.media else base_url,
+                        'range': segment_url.media_range,
+                    })
+
+                result[adaptation_set.mime_type] = segments
+            return result
         except ValueError:
             raise InvalidResolution('Invalid resolution specified')
 
     def _fetch_mpd_master(self) -> MPEGDASH:
         return MPEGDASHParser.parse(self.http.get(
             url=self.kinescope_video.get_mpd_master_playlist_url(),
-            headers={'Referer': KINESCOPE_BASE_URL}
+            headers={'Referer': self.referer}
         ).text)
 
     def get_resolutions(self) -> list[tuple[int, int]]:

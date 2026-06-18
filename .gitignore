@@ -1,8 +1,14 @@
 .idea
+.DS_Store
 venv
 build
 dist
 **/__pycache__/
 temp
+temp_dl
+.dl_temp
+downloads
+DaMa Club Videos/
+catalog/download_manifest.json
 ffmpeg.exe
 mp4decrypt.exe

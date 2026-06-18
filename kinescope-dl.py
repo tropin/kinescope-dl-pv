@@ -33,8 +33,8 @@ class URLType(click.ParamType):
 )
 @click.argument('input_url', type=URLType())
 @click.argument('output_file', type=click.Path())
-@click.option("--ffmpeg-path", default='./ffmpeg', required=False, help='Path to ffmpeg executable', type=click.Path())
-@click.option("--mp4decrypt-path", default='./mp4decrypt', required=False, help='Path to mp4decrypt executable', type=click.Path())
+@click.option("--ffmpeg-path", default='ffmpeg', required=False, help='Path to ffmpeg executable (default: looked up on PATH)', type=click.Path())
+@click.option("--mp4decrypt-path", default='mp4decrypt', required=False, help='Path to mp4decrypt executable (default: looked up on PATH)', type=click.Path())
 def main(referer,
          best_quality,
          temp, 
