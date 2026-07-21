@@ -10,5 +10,9 @@ temp_dl
 downloads
 DaMa Club Videos/
 catalog/download_manifest.json
+export/
+bazil/.cookies.txt
+bazil/*.log
+bazil/download_manifest.json
 ffmpeg.exe
 mp4decrypt.exe
